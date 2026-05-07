@@ -2,44 +2,36 @@ name: create images with text arabic
 
 on:
   schedule:
-    - cron: '*/40 * * * *'   # Every 40 minutes
-  workflow_dispatch:          # Allow manual trigger
+    - cron: '*/40 * * * *'
+  workflow_dispatch:
 
 permissions:
-  contents: write             # Needed to commit the image
+  contents: write
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       
-      - name: Install system dependencies (Arabic font support)
+      - name: Install Arabic support & fonts
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-dejavu-core
-      
-      - name: Install Python dependencies
-        run: |
-          pip install --upgrade pip
           pip install feedparser requests Pillow arabic-reshaper python-bidi
       
-      - name: Run image generator
+      - name: Generate image
         run: python generate_news_image.py
         env:
           PYTHONIOENCODING: utf-8
       
-      - name: Commit and push if image changed
+      - name: Commit and push
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
           git add output.webp last_article.txt
-          git diff --cached --quiet || git commit -m "Auto-generate news image: $(date +'%Y-%m-%d %H:%M')"
+          git diff --cached --quiet || git commit -m "Auto news image $(date +'%Y-%m-%d %H:%M')"
           git push
