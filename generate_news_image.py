@@ -5,205 +5,212 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import arabic_reshaper
 from bidi.algorithm import get_display
 import os
+import sys
 import re
 
 # ============================================================
-# CONFIGURATION - Change these as needed
+# CONFIGURATION
 # ============================================================
 RSS_URL = "https://www.telegraphe.ma/rss/latest-posts"
-OUTPUT_IMAGE = "output.webp"           # File to save in your repo
-LAST_ARTICLE_FILE = "last_article.txt" # Tracks last processed article
+OUTPUT_IMAGE = "output.webp"
+LAST_ARTICLE_FILE = "last_article.txt"
 
-# ============================================================
-# IMAGE DIMENSIONS (match your example style)
-# ============================================================
-WIDTH, HEIGHT = 1280, 720               # 16:9 landscape
-TEXT_AREA_HEIGHT = 200                  # height of the semi-transparent bar at bottom
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"  # Linux default font
+WIDTH, HEIGHT = 1280, 720
+BAR_HEIGHT = 200   # height of the dark bottom bar
 
 # ============================================================
 # ARABIC TEXT HELPERS
 # ============================================================
-def fix_arabic_text(text: str) -> str:
-    """Reshape Arabic text and fix its direction for proper display."""
+def fix_arabic(text: str) -> str:
+    """Reshape and flip Arabic text for correct display."""
     reshaped = arabic_reshaper.reshape(text)
     return get_display(reshaped)
 
-def format_date(date_struct) -> str:
-    """Convert feedparser date to DD/MM/YYYY format."""
-    if date_struct:
-        try:
-            return datetime(*date_struct[:6]).strftime("%d/%m/%Y")
-        except:
-            pass
-    return datetime.now().strftime("%d/%m/%Y")
-
 def clean_html(text: str) -> str:
-    """Remove HTML tags and decode entities."""
     if not text:
         return ""
     text = re.sub(r'<[^>]+>', '', text)
-    text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
     return text.strip()
 
-def fetch_latest_article():
-    """Get the most recent article from RSS feed."""
-    feed = feedparser.parse(RSS_URL)
-    
-    if not feed.entries:
-        print("❌ No entries found in RSS feed.")
-        return None
-        
-    latest = feed.entries[0]  # First entry = newest
-    print(f"📰 Found: {latest.title}")
-    return latest
+def get_date(entry) -> str:
+    """Extract date from feed entry or use today."""
+    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+        return datetime(*entry.published_parsed[:6]).strftime("%d/%m/%Y")
+    elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+        return datetime(*entry.updated_parsed[:6]).strftime("%d/%m/%Y")
+    return datetime.now().strftime("%d/%m/%Y")
 
-def download_image(url: str) -> Image.Image:
-    """Download image from URL and return PIL Image object."""
-    try:
-        response = requests.get(url, timeout=15, stream=True)
-        response.raise_for_status()
-        img = Image.open(response.raw).convert("RGB")
-        print("✅ Image downloaded successfully.")
-        return img
-    except Exception as e:
-        print(f"⚠️ Failed to download image: {e}")
-        return None
+def get_image_url(entry):
+    """Extract image URL from various possible RSS fields."""
+    # Try media:content
+    if hasattr(entry, 'media_content') and entry.media_content:
+        return entry.media_content[0]['url']
+    # Try enclosure
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get('type', '').startswith('image/'):
+                return enc['href']
+    # Try regex in description
+    if hasattr(entry, 'description') and entry.description:
+        match = re.search(r'src="([^"]+)"', entry.description)
+        if match:
+            return match.group(1)
+    # Try link to an image (if direct)
+    if hasattr(entry, 'link') and entry.link.endswith(('.jpg', '.png', '.webp')):
+        return entry.link
+    return None
 
-def create_news_image(article):
-    """
-    Main image creation function.
-    Places title and date on bottom overlay (like the example).
-    """
-    # 1. Get the article image (or use solid fallback)
-    image_url = None
-    if hasattr(article, 'media_content') and article.media_content:
-        image_url = article.media_content[0]['url']
-    elif hasattr(article, 'links'):
-        for link in article.links:
-            if link.get('type', '').startswith('image/'):
-                image_url = link['href']
-                break
+def load_font(size):
+    """Load a font – tries common Linux paths, then falls back to default."""
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",  # for local macOS testing
+        "/Windows/Fonts/arial.ttf",             # for local Windows
+    ]
+    for path in font_paths:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except:
+                continue
+    # Ultimate fallback – PIL default font (will be tiny but visible)
+    print("⚠️ No TTF font found – using default PIL font (text may be small)")
+    return ImageFont.load_default()
+
+# ============================================================
+# MAIN IMAGE CREATION
+# ============================================================
+def create_news_image(entry):
+    print("🖼️ Creating image...")
+
+    # 1. Fetch background image (or use solid color)
+    img_url = get_image_url(entry)
+    bg = None
+    if img_url:
+        try:
+            r = requests.get(img_url, timeout=15, stream=True)
+            if r.status_code == 200:
+                bg = Image.open(r.raw).convert("RGB")
+                bg = bg.resize((WIDTH, HEIGHT), Image.LANCZOS)
+                print("✅ Background image loaded")
+            else:
+                print(f"⚠️ Image download failed (status {r.status_code})")
+        except Exception as e:
+            print(f"⚠️ Image error: {e}")
     
-    if image_url:
-        background = download_image(image_url)
-    else:
-        print("⚠️ No image found in RSS, using gradient fallback.")
-        background = None
-    
-    # Create canvas with fallback if no image
-    if background:
-        background = background.resize((WIDTH, HEIGHT), Image.LANCZOS)
-        canvas = background.convert("RGBA")
-    else:
+    if bg is None:
         # Fallback: gradient background
-        canvas = Image.new("RGBA", (WIDTH, HEIGHT), (25, 40, 65, 255))
-        draw = ImageDraw.Draw(canvas)
+        bg = Image.new("RGB", (WIDTH, HEIGHT), (20, 30, 50))
+        draw = ImageDraw.Draw(bg)
         for i in range(HEIGHT):
             t = i / HEIGHT
-            r = int(10 + t * 20)
-            g = int(22 + t * 40)
-            b = int(40 + t * 70)
+            r = int(20 + t * 30)
+            g = int(30 + t * 40)
+            b = int(50 + t * 60)
             draw.line([(0, i), (WIDTH, i)], fill=(r, g, b))
-    
-    # 2. Create semi‑transparent overlay at bottom (like your example's dark bar)
-    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        print("ℹ️ Using gradient fallback background")
+
+    # 2. Create overlay for dark bottom bar
+    overlay = Image.new("RGBA", bg.size, (0, 0, 0, 0))
     draw_overlay = ImageDraw.Draw(overlay)
-    
-    # Draw dark bar at bottom with 70% opacity
-    bar_height = TEXT_AREA_HEIGHT
     draw_overlay.rectangle(
-        [(0, HEIGHT - bar_height), (WIDTH, HEIGHT)],
-        fill=(0, 0, 0, 180)  # black, 70% opacity
+        [(0, HEIGHT - BAR_HEIGHT), (WIDTH, HEIGHT)],
+        fill=(0, 0, 0, 200)   # black with 78% opacity
     )
-    
-    # Optional: add a subtle gradient to the bar
-    for i in range(bar_height):
-        t = i / bar_height
-        alpha = int(180 * (1 - t * 0.3))  # slight fade at top edge
+    # Optional: softer top edge
+    for i in range(20):
+        alpha = int(200 * (1 - i/20))
         draw_overlay.line(
-            [(0, HEIGHT - bar_height + i), (WIDTH, HEIGHT - bar_height + i)],
+            [(0, HEIGHT - BAR_HEIGHT + i), (WIDTH, HEIGHT - BAR_HEIGHT + i)],
             fill=(0, 0, 0, alpha)
         )
-    
-    # Composite the overlay onto the canvas
-    canvas = Image.alpha_composite(canvas, overlay)
-    
-    # 3. Prepare Arab ci text
-    title = clean_html(article.title)
-    pub_date = format_date(getattr(article, 'published_parsed', None))
-    
-    fixed_title = fix_arabic_text(title)
-    fixed_date = fix_arabic_text(pub_date)
-    
-    # Load font (adjust size as needed)
+
+    # Composite overlay onto background
+    final = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
+    draw = ImageDraw.Draw(final)
+
+    # 3. Prepare Arabic text
+    title_raw = clean_html(entry.title)
+    date_raw = get_date(entry)
+    print(f"📝 Title: {title_raw}")
+    print(f"📅 Date: {date_raw}")
+
+    title_arab = fix_arabic(title_raw)
+    date_arab = fix_arabic(date_raw)
+
+    # 4. Load fonts (sizes adjusted for 1280x720)
+    font_title = load_font(48)
+    font_date = load_font(32)
+
+    # Measure text size (for centering)
+    # Note: textbbox may be inaccurate with default font, but we try
     try:
-        font_title = ImageFont.truetype(FONT_PATH, 42)
-        font_date = ImageFont.truetype(FONT_PATH, 28)
+        bbox = draw.textbbox((0, 0), title_arab, font=font_title)
+        title_w = bbox[2] - bbox[0]
+        title_h = bbox[3] - bbox[1]
     except:
-        # Fallback to default if font not found
-        font_title = ImageFont.load_default()
-        font_date = ImageFont.load_default()
+        title_w, title_h = draw.textsize(title_arab, font=font_title) if hasattr(draw, "textsize") else (WIDTH//2, 40)
     
-    draw = ImageDraw.Draw(canvas)
-    
-    # 4. Position text inside the bottom bar
-    
-    # Title – centered with right‑to‑left orientation
-    bbox = draw.textbbox((0, 0), fixed_title, font=font_title)
-    title_width = bbox[2] - bbox[0]
-    title_height = bbox[3] - bbox[1]
-    title_x = (WIDTH - title_width) // 2
-    title_y = HEIGHT - bar_height + (bar_height - title_height) // 2 - 15
-    
-    draw.text((title_x, title_y), fixed_title, fill=(255, 255, 255), font=font_title)
-    
-    # Date – placed to the right, smaller size
-    bbox = draw.textbbox((0, 0), fixed_date, font=font_date)
-    date_width = bbox[2] - bbox[0]
-    date_x = WIDTH - date_width - 30
-    date_y = title_y + title_height + 5
-    
-    draw.text((date_x, date_y), fixed_date, fill=(200, 200, 200), font=font_date)
-    
+    # Position title – centered horizontally, vertically inside the bar
+    title_x = (WIDTH - title_w) // 2
+    # Title starts about 40px above the bar's middle
+    title_y = HEIGHT - BAR_HEIGHT + (BAR_HEIGHT - title_h) // 2 - 10
+
+    # Draw title with shadow for readability
+    draw.text((title_x + 2, title_y + 2), title_arab, fill=(0, 0, 0, 150), font=font_title)
+    draw.text((title_x, title_y), title_arab, fill=(255, 255, 255), font=font_title)
+    print(f"✅ Title drawn at ({title_x}, {title_y})")
+
+    # Draw date – bottom right inside the bar
+    try:
+        bbox = draw.textbbox((0, 0), date_arab, font=font_date)
+        date_w = bbox[2] - bbox[0]
+        date_h = bbox[3] - bbox[1]
+    except:
+        date_w, date_h = draw.textsize(date_arab, font=font_date) if hasattr(draw, "textsize") else (100, 30)
+    date_x = WIDTH - date_w - 30
+    date_y = HEIGHT - BAR_HEIGHT + (BAR_HEIGHT - date_h) // 2 + 15
+
+    draw.text((date_x + 1, date_y + 1), date_arab, fill=(0, 0, 0, 150), font=font_date)
+    draw.text((date_x, date_y), date_arab, fill=(220, 220, 220), font=font_date)
+    print(f"✅ Date drawn at ({date_x}, {date_y})")
+
     # 5. Save image
-    canvas = canvas.convert("RGB")
-    canvas.save(OUTPUT_IMAGE, "WEBP", quality=90)
-    print(f"✅ Image saved as {OUTPUT_IMAGE}")
+    final.save(OUTPUT_IMAGE, "WEBP", quality=90)
+    print(f"💾 Saved as {OUTPUT_IMAGE}")
     return OUTPUT_IMAGE
 
-def already_processed(article_id: str) -> bool:
-    """Check if this article has been processed before."""
+# ============================================================
+# TRACKING AND MAIN
+# ============================================================
+def already_processed(article_id):
     if not os.path.exists(LAST_ARTICLE_FILE):
         return False
-    with open(LAST_ARTICLE_FILE, "r") as f:
-        processed = f.read().strip().split("\n")
-    return article_id in processed
+    with open(LAST_ARTICLE_FILE, 'r') as f:
+        return article_id in f.read()
 
-def mark_processed(article_id: str):
-    """Mark article as processed."""
-    with open(LAST_ARTICLE_FILE, "a") as f:
+def mark_processed(article_id):
+    with open(LAST_ARTICLE_FILE, 'a') as f:
         f.write(f"{article_id}\n")
 
 def main():
-    print("🚀 Starting news image generator...")
-    article = fetch_latest_article()
-    
-    if not article:
-        print("❌ No article fetched. Exiting.")
+    print("🚀 Fetching RSS...")
+    feed = feedparser.parse(RSS_URL)
+    if not feed.entries:
+        print("❌ No entries found.")
         return
     
-    # Use article link as unique ID
-    article_id = article.link if hasattr(article, 'link') else article.title
+    latest = feed.entries[0]
+    article_id = latest.link if hasattr(latest, 'link') else latest.title
     if already_processed(article_id):
-        print("ℹ️ Latest article already processed. Exiting.")
+        print("ℹ️ Already processed, skipping.")
         return
     
-    create_news_image(article)
+    print(f"📰 Processing: {latest.title}")
+    create_news_image(latest)
     mark_processed(article_id)
-    
-    # This will be saved as output.webp – GitHub Action will commit it
-    print("✨ Done!")
+    print("✨ Done.")
 
 if __name__ == "__main__":
     main()
